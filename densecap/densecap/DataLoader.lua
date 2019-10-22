@@ -22,6 +22,13 @@ function DataLoader:__init(opt)
   end
   self.info.idx_to_token = idx_to_token
 
+  -- Convert keys in idx_to_fullcaps from string to integer
+  local idx_to_fullcaps = {}
+  for k, v in pairs(self.info.idx_to_fullcaps) do
+    idx_to_fullcaps[tonumber(k)] = tonumber(v)
+  end
+  self.info.idx_to_fullcaps = idx_to_fullcaps
+
   -- open the hdf5 file
   print('DataLoader loading h5 file: ', self.h5_file)
   self.h5_file = hdf5.open(self.h5_file, 'r')
@@ -34,6 +41,8 @@ function DataLoader:__init(opt)
   table.insert(keys, 'img_to_last_box')
   table.insert(keys, 'labels')
   table.insert(keys, 'lengths')
+  table.insert(keys, 'fullcaps')
+  table.insert(keys, 'fullcaps_lengths')
   table.insert(keys, 'original_heights')
   table.insert(keys, 'original_widths')
   table.insert(keys, 'split')
@@ -74,7 +83,8 @@ function DataLoader:__init(opt)
     if self.split[i] == 1 then table.insert(self.val_ix, i) end
     if self.split[i] == 2 then table.insert(self.test_ix, i) end
   end
-
+  math.randomseed(os.time()) -- be sure to set randomseed somewhere for better randomness
+  self.train_ix = self:shuffleInds(self.train_ix)
   self.iterators = {[0]=1,[1]=1,[2]=1} -- iterators (indices to split lists) for train/val/test
   print(string.format('assigned %d/%d/%d images to train/val/test.', #self.train_ix, #self.val_ix, #self.test_ix))
 
@@ -114,7 +124,7 @@ function DataLoader:decodeSequence(seq)
       if ix >= 1 and ix <= self.vocab_size then
         -- a word, translate it
         if j >= 2 then txt = txt .. ' ' end -- space
-        txt = txt .. itow[tostring(ix)]
+        txt = txt .. itow[ix]
       else
         -- END token
         break
@@ -129,6 +139,28 @@ end
 function DataLoader:resetIterator(split)
   assert(split == 0 or split == 1 or split == 2, 'split must be integer, either 0 (train), 1 (val) or 2 (test)')
   self.iterators[split] = 1
+end
+
+function DataLoader:shuffleInds(array)
+    -- fisher-yates
+    local output = { }
+    local random = math.random
+
+    for index = 1, #array do
+        local offset = index - 1
+        local value = array[index]
+        local randomIndex = offset*random()
+        local flooredIndex = randomIndex - randomIndex%1
+
+        if flooredIndex == offset then
+            output[#output + 1] = value
+        else
+            output[#output + 1] = output[flooredIndex + 1]
+            output[flooredIndex + 1] = value
+        end
+    end
+
+    return output
 end
 
 --[[
@@ -159,7 +191,11 @@ function DataLoader:getBatch(opt)
   if iterate then
     ri = self.iterators[split] -- get next index from iterator
     local ri_next = ri + 1 -- increment iterator
-    if ri_next > max_index then ri_next = 1 end -- wrap back around
+    if ri_next > max_index then
+      math.randomseed(os.time()) -- be sure to set randomseed somewhere for better randomness
+      split_ix = self:shuffleInds(split_ix)
+      ri_next = 1 
+    end -- wrap back around
     self.iterators[split] = ri_next
   else
     -- pick an index randomly
@@ -169,7 +205,7 @@ function DataLoader:getBatch(opt)
   assert(ix ~= nil, 'bug: split ' .. split .. ' was accessed out of bounds with ' .. ri)
   
   -- fetch the image
-  local  img = self.h5_file:read('/images'):partial({ix,ix},{1,self.num_channels},
+  local img = self.h5_file:read('/images'):partial({ix,ix},{1,self.num_channels},
                             {1,self.max_image_size},{1,self.max_image_size})
 
   -- crop image to its original width/height, get rid of padding, and dummy first dim
@@ -177,6 +213,16 @@ function DataLoader:getBatch(opt)
   img = img:float() -- convert to float
   img = img:view(1, img:size(1), img:size(2), img:size(3)) -- batch the image
   img:add(-1, self.vgg_mean:expandAs(img)) -- subtract vgg mean
+
+  -- fetch the corresponding full image caption (if exists)
+  local fullcap = nil
+  if self.info.idx_to_fullcaps[ix] ~= nil then
+    print('fullcap found!')
+    local fcp_ind = self.info.idx_to_fullcaps[ix]
+    fullcap = self.fullcaps[fcp_ind]
+    -- print(fullcap)
+    print(self:decodeSequence(fullcap:view(fullcap:size(1),1)))
+  end
 
   -- fetch the corresponding labels array
   local r0 = self.img_to_first_box[ix]
@@ -196,7 +242,7 @@ function DataLoader:getBatch(opt)
   local w,h = self.image_widths[ix], self.image_heights[ix]
   local ow,oh = self.original_widths[ix], self.original_heights[ix]
   local info_table = { {filename = filename, 
-                        split_bounds = {ri, #split_ix},
+                        split_bounds = {ri, ix, #split_ix},
                         width = w, height = h, ori_width = ow, ori_height = oh} }
 
   -- read regions if applicable
@@ -214,6 +260,6 @@ function DataLoader:getBatch(opt)
   end
 
   -- TODO: start a prefetching thread to load the next image ?
-  return img, box_batch, label_array, info_table, obj_boxes
+  return img, box_batch, label_array, info_table, obj_boxes, fullcap
 end
 

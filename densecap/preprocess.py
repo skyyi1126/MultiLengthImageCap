@@ -2,13 +2,15 @@
 
 import argparse, os, json, string
 from collections import Counter
-from Queue import Queue
+from queue import Queue
 from threading import Thread, Lock
 
 from math import floor
 import h5py
 import numpy as np
-from scipy.misc import imread, imresize
+from scipy.misc.pilutil import imread, imresize
+
+import pickle
 
 
 """
@@ -81,22 +83,25 @@ M total regions:
 - box_to_img: int32 array of shape (M,). If box_to_img[i] = j then then
   regions[i] and captions[i] refer to images[j] (using one-indexing).
 """
-
-def build_vocab(data, min_token_instances, verbose=True):
+# todo: add fullcaps
+def build_vocab(data, fullcaps, min_token_instances, verbose=True):
   """ Builds a set that contains the vocab. Filters infrequent tokens. """
   token_counter = Counter()
   for img in data:
     for region in img['regions']:
       if region['tokens'] is not None:
         token_counter.update(region['tokens'])
+  for cap in fullcaps:
+    token_counter.update(cap)
+
   vocab = set()
-  for token, count in token_counter.iteritems():
+  for token, count in token_counter.items():
     if count >= min_token_instances:
       vocab.add(token)
       
   if verbose:
-    print ('Keeping %d / %d tokens with enough instances'
-              % (len(vocab), len(token_counter)))
+    print(('Keeping %d / %d tokens with enough instances'
+              % (len(vocab), len(token_counter))))
 
   if len(vocab) < len(token_counter):
     vocab.add('<UNK>')
@@ -180,7 +185,7 @@ def encode_boxes(data, original_heights, original_widths, image_size):
       assert box[3]>=0
       all_boxes.append(box)
 
-  print 'number of bad x,y,w,h: ', xwasbad, ywasbad, wwasbad, hwasbad
+  print('number of bad x,y,w,h: ', xwasbad, ywasbad, wwasbad, hwasbad)
   return np.vstack(all_boxes)
 
 def build_img_idx_to_box_idxs(data):
@@ -257,7 +262,7 @@ def add_images(data, h5_file, args):
 
       lock.acquire()
       if i % 1000 == 0:
-        print 'Writing image %d / %d' % (i, len(data))
+        print('Writing image %d / %d' % (i, len(data)))
       original_heights[i] = H0
       original_widths[i] = W0
       image_heights[i] = H
@@ -267,7 +272,7 @@ def add_images(data, h5_file, args):
       q.task_done()
   
   print('adding images to hdf5.... (this might take a while)')
-  for i in xrange(args.num_workers):
+  for i in range(args.num_workers):
     t = Thread(target=worker)
     t.daemon = True
     t.start()
@@ -281,20 +286,20 @@ def add_images(data, h5_file, args):
 def words_preprocess(phrase):
   """ preprocess a sentence: lowercase, clean up weird chars, remove punctuation """
   replacements = {
-    u'½': u'half',
-    u'—' : u'-',
-    u'™': u'',
-    u'¢': u'cent',
-    u'ç': u'c',
-    u'û': u'u',
-    u'é': u'e',
-    u'°': u' degree',
-    u'è': u'e',
-    u'…': u'',
+    '½': 'half',
+    '—' : '-',
+    '™': '',
+    '¢': 'cent',
+    'ç': 'c',
+    'û': 'u',
+    'é': 'e',
+    '°': ' degree',
+    'è': 'e',
+    '…': '',
   }
-  for k, v in replacements.iteritems():
+  for k, v in replacements.items():
     phrase = phrase.replace(k, v)
-  return str(phrase).lower().translate(None, string.punctuation).split()
+  return str(phrase).lower().translate(str.maketrans('','',string.punctuation)).split()
 
 def split_filter_captions(data, max_token_length, tokens_type, verbose=True):
   """
@@ -307,7 +312,7 @@ def split_filter_captions(data, max_token_length, tokens_type, verbose=True):
   captions_removed = 0
   for i, img in enumerate(data):
     if verbose and (i + 1) % 2000 == 0:
-      print 'Splitting tokens in image %d / %d' % (i + 1, len(data))
+      print('Splitting tokens in image %d / %d' % (i + 1, len(data)))
     regions_per_image = 0
     img_kept, img_removed = 0, 0
     for region in img['regions']:
@@ -332,19 +337,19 @@ def split_filter_captions(data, max_token_length, tokens_type, verbose=True):
         img_removed += 1
     
     if regions_per_image == 0:
-      print 'kept %d, removed %d' % (img_kept, img_removed)
+      print('kept %d, removed %d' % (img_kept, img_removed))
       assert False, 'DANGER, some image has no valid regions. Not super sure this doesnt cause bugs. Think about more if it comes up'
 
   if verbose:
-    print 'Keeping %d captions' % captions_kept
-    print 'Skipped %d captions for being too long' % captions_removed
+    print('Keeping %d captions' % captions_kept)
+    print('Skipped %d captions for being too long' % captions_removed)
 
 def encode_splits(data, split_data):
   """ Encode splits as intetgers and return the array. """
   lookup = {'train': 0, 'val': 1, 'test': 2}
   id_to_split = {}
   split_array = np.zeros(len(data))
-  for split, idxs in split_data.iteritems():
+  for split, idxs in split_data.items():
     for idx in idxs:
       id_to_split[idx] = split
   for i, img in enumerate(data):
@@ -355,7 +360,7 @@ def encode_splits(data, split_data):
 def filter_images(data, split_data):
   """ Keep only images that are in some split and have some captions """
   all_split_ids = set()
-  for split_name, ids in split_data.iteritems():
+  for split_name, ids in split_data.items():
     all_split_ids.update(ids)
   new_data = []
   for img in data:
@@ -363,6 +368,38 @@ def filter_images(data, split_data):
     if keep:
       new_data.append(img)
   return new_data
+
+def filter_fullcaps(full_caps, filename_to_idx):
+  valid_fc_cnt = 1
+  fullcaps_to_idx, idx_to_fullcaps = {}, {}
+  selected_fullcaps = []
+  for cap in full_caps:
+    filename = str(cap['image_id'])+'.jpg'
+    if filename in filename_to_idx:
+      idx = filename_to_idx[filename]
+      idx_to_fullcaps[idx] = valid_fc_cnt
+      fullcaps_to_idx[valid_fc_cnt] = idx
+      valid_fc_cnt += 1
+      selected_fullcaps.append(words_preprocess(cap['paragraph']))
+
+  return selected_fullcaps, fullcaps_to_idx, idx_to_fullcaps
+
+def encode_fulcaps(selected_fullcaps, token_to_idx):
+  encoded_list = []
+  lengths = []
+  tmp_len = 0
+  max_token_length = 0
+  for cap in selected_fullcaps:
+    tmp_len = len(cap)
+    if tmp_len > max_token_length:
+      max_token_length = tmp_len
+  print('Max full cap lengths: '+str(max_token_length))
+  for cap in selected_fullcaps:
+    tokens_encoded = encode_caption(cap, token_to_idx, max_token_length)
+    encoded_list.append(tokens_encoded)
+    lengths.append(len(cap))
+
+  return np.vstack(encoded_list), np.asarray(lengths, dtype=np.int32)#fullcaps_matrix, fullcaps_lengths_vector
 
 
 def main(args):
@@ -372,11 +409,14 @@ def main(args):
     data = json.load(f)
   with open(args.split_json, 'r') as f:
     split_data = json.load(f)
+  
+  with open(args.full_image_data, 'r') as f:
+    full_caps = json.load(f)
 
   # Only keep images that are in a split
-  print 'There are %d images total' % len(data)
+  print('There are %d images total' % len(data))
   data = filter_images(data, split_data)
-  print 'After filtering for splits there are %d images' % len(data)
+  print('After filtering for splits there are %d images' % len(data))
 
   if args.max_images > 0:
     data = data[:args.max_images]
@@ -394,15 +434,39 @@ def main(args):
   # process "label" field in each region to a "tokens" field, and cap at some max length
   split_filter_captions(data, args.max_token_length, args.tokens_type)
 
-  # build vocabulary
-  vocab = build_vocab(data, args.min_token_instances) # vocab is a set()
+  filename_to_idx, idx_to_filename = build_filename_dict(data)
+  box_to_img = encode_filenames(data, filename_to_idx)
+  f.create_dataset('box_to_img', data=box_to_img)
+
+  selected_fullcaps, fullcaps_to_idx, idx_to_fullcaps = filter_fullcaps(full_caps, filename_to_idx)
+
+  # build vocabulary 
+  # todo: include full image captions
+  vocab = build_vocab(data, selected_fullcaps, args.min_token_instances) # vocab is a set()
   token_to_idx, idx_to_token = build_vocab_dict(vocab) # both mappings are dicts
     
+  vocab_data = {}
+  # save vocab
+  vocab_data['vocab'] = vocab
+  # save selected fullcaps
+  vocab_data['selected_fullcaps'] = selected_fullcaps
+  # save token_to_idx
+  vocab_data['token_to_idx'] = token_to_idx
+  
+  with open('vocab_data.pkl','wb') as fv:
+    pickle.dump(vocab_data,fv)
+  print('pickle dump done.')
+
   # encode labels
   captions_matrix, lengths_vector = encode_captions(data, token_to_idx, args.max_token_length)
   f.create_dataset('labels', data=captions_matrix)
   f.create_dataset('lengths', data=lengths_vector)
   
+  # encode full caps
+  fullcaps_matrix, fullcaps_lengths_vector = encode_fulcaps(selected_fullcaps, token_to_idx)
+  f.create_dataset('fullcaps', data=fullcaps_matrix)
+  f.create_dataset('fullcaps_lengths', data=fullcaps_lengths_vector)
+
   # encode boxes
   original_heights = np.asarray(f['original_heights'])
   original_widths = np.asarray(f['original_widths'])
@@ -413,9 +477,10 @@ def main(args):
   img_to_first_box, img_to_last_box = build_img_idx_to_box_idxs(data)
   f.create_dataset('img_to_first_box', data=img_to_first_box)
   f.create_dataset('img_to_last_box', data=img_to_last_box)
-  filename_to_idx, idx_to_filename = build_filename_dict(data)
-  box_to_img = encode_filenames(data, filename_to_idx)
-  f.create_dataset('box_to_img', data=box_to_img)
+  # filename_to_idx, idx_to_filename = build_filename_dict(data)
+  # box_to_img = encode_filenames(data, filename_to_idx)
+  # f.create_dataset('box_to_img', data=box_to_img)
+
   f.close()
 
   # and write the additional json file 
@@ -424,6 +489,8 @@ def main(args):
     'idx_to_token': idx_to_token,
     'filename_to_idx': filename_to_idx,
     'idx_to_filename': idx_to_filename,
+    'fullcaps_to_idx': fullcaps_to_idx,
+    'idx_to_fullcaps': idx_to_fullcaps
   }
   with open(args.json_output, 'w') as f:
     json.dump(json_struct, f)
@@ -436,6 +503,9 @@ if __name__ == '__main__':
   parser.add_argument('--region_data',
       default='data/visual-genome/region_descriptions.json',
       help='Input JSON file with regions and captions')
+  parser.add_argument('--full_image_data',
+      default='data/visual-genome/full_image_descriptions.json',
+      help='Input JSON file with images and captions')
   parser.add_argument('--image_dir',
       default='data/visual-genome/images',
       help='Directory containing all images')

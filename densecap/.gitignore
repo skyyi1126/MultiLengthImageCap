@@ -1,4 +1,6 @@
-/data
+/data*
 *.swp
 /vis/data/*.jpg
 /vis/data/*.json
+/model/__pycache__
+data_pipeline/
